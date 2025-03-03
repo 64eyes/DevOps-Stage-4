@@ -1,0 +1,156 @@
+version: "3.8"
+
+services:
+  traefik:
+    image: "traefik:v2.10"
+    container_name: "traefik"
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Redirects
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # Certificate resolver
+      - "--certificatesresolvers.leresolver.acme.email=madamorit8@gmail.com"
+      - "--certificatesresolvers.leresolver.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.leresolver.acme.httpchallenge.entrypoint=web"
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - web
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./letsencrypt:/letsencrypt
+    labels:
+      - "traefik.enable=true"
+      # CORS middleware definition (moved here from command section)
+      - "traefik.http.middlewares.cors.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowmethods=GET,POST,PUT,DELETE,OPTIONS"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowheaders=Content-Type,Authorization"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - TODOS_API_ADDRESS=http://todos-api:8082
+      - AUTH_API_ADDRESS=http://auth-api:8081
+      - HOST=0.0.0.0
+    # volumes:
+    #   - ./frontend:/app
+    #   - /app/node_modules
+    depends_on:
+      - auth-api
+      - todos-api
+      - users-api
+    # command: sh -c "npm run dev -- --host 0.0.0.0"
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`64eyes.duckdns.org`)"
+      - "traefik.http.routers.frontend.tls.certresolver=leresolver"
+      - "traefik.http.services.frontend.loadbalancer.server.port=8080"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+
+  auth-api:
+    build:
+      context: ./auth-api
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - AUTH_API_PORT=8081
+      - JWT_SECRET=myfancysecret
+      - USERS_API_ADDRESS=http://users-api:8083
+    depends_on:
+      - users-api
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=Host(`64eyes.duckdns.org`) && PathPrefix(`/api/auth`)"
+      - "traefik.http.routers.auth.entrypoints=websecure"
+      - "traefik.http.routers.auth.tls.certresolver=leresolver"
+      - "traefik.http.services.auth.loadbalancer.server.port=8081"
+      - "traefik.http.middlewares.auth-stripprefix.stripprefix.prefixes=/api/auth"
+      - "traefik.http.routers.auth.middlewares=auth-stripprefix,cors"
+  todos-api:
+    build:
+      context: ./todos-api
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - JWT_SECRET=myfancysecret
+      - REDIS_HOST=redis-queue
+      - REDIS_PORT=6379
+      - REDIS_CHANNEL=log_channel
+    depends_on:
+      - redis-queue
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.todos.rule=Host(`64eyes.duckdns.org`) && PathPrefix(`/api/todos`)"
+      - "traefik.http.routers.todos.entrypoints=websecure"
+      - "traefik.http.routers.todos.tls.certresolver=leresolver"
+      - "traefik.http.services.todos.loadbalancer.server.port=8082"
+      - "traefik.http.middlewares.todos-stripprefix.stripprefix.prefixes=/api/todos"
+      - "traefik.http.routers.todos.middlewares=todos-stripprefix"
+  users-api:
+    build:
+      context: ./users-api
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - SERVER_PORT=8083
+      - JWT_SECRET=myfancysecret
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.users.rule=Host(`64eyes.duckdns.org`) && PathPrefix(`/api/users`)"
+      - "traefik.http.routers.users.entrypoints=websecure"
+      - "traefik.http.routers.users.tls.certresolver=leresolver"
+      - "traefik.http.services.users.loadbalancer.server.port=8083"
+      - "traefik.http.middlewares.users-stripprefix.stripprefix.prefixes=/api/users"
+      - "traefik.http.routers.users.middlewares=users-stripprefix"
+  log-message-processor:
+    build:
+      context: ./log-message-processor
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis-queue
+      - REDIS_PORT=6379
+      - REDIS_CHANNEL=log_channel
+    depends_on:
+      - redis-queue
+    networks:
+      - web
+
+  redis-queue:
+    image: "redis:alpine"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - web
+
+networks:
+  web:
+    driver: bridge
+
+volumes:
+  redis-data:
